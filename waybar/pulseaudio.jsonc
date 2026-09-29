@@ -1,0 +1,9 @@
+{
+  "pulseaudio": {
+    "format": "{icon}",
+    "on-click": "xdg-terminal-exec --app-id=org.sherqo.ember -- $HOME/ember/bin/ember",
+    "on-click-right": "pamixer -t",
+    "tooltip-format": "Playing at {volume}%",
+    "scroll-step": 5
+  }
+}
