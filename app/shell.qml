@@ -1,10 +1,8 @@
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
-import "ui" as Ui
-import "audio" as Audio
 
-// Ember — warm little audio mixer. One window, quits on close.
+// Ember host: EmberPanel fills this window. Esc quits. Zero idle RAM.
 ShellRoot {
   id: shell
 
@@ -14,14 +12,13 @@ ShellRoot {
     exclusionMode: ExclusionMode.Ignore
     WlrLayershell.namespace: "ember"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
 
     anchors.top: true
     anchors.right: true
     margins.top: 34
     margins.right: 12
-    implicitWidth: 380
-    implicitHeight: 540
+    implicitWidth: 400
+    implicitHeight: 600
 
     FocusScope {
       anchors.fill: parent
@@ -30,15 +27,15 @@ ShellRoot {
 
       Rectangle {
         anchors.fill: parent
-        radius: Ui.Theme.radius
-        color: Ui.Theme.background
-        border.color: Ui.Theme.muted
+        radius: 10
+        color: "#202330"
+        border.color: "#565970"
         border.width: 1
       }
 
-      Audio.Panel {
+      EmberPanel {
         anchors.fill: parent
-        anchors.margins: Ui.Theme.padding
+        anchors.margins: 14
       }
     }
   }

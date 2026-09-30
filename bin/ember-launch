@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Ember launcher: opens the mixer panel, nothing stays resident.
+# Waybar pulseaudio module on-click calls this. Esc closes it.
+export PATH="$HOME/ember/bin:$PATH"
+export EMBER_ROOT="$HOME/ember"
+
+if pgrep -f "quickshell -p $EMBER_ROOT/app" >/dev/null; then
+  exit 0
+fi
+
+setsid quickshell -p "$EMBER_ROOT/app" >/dev/null 2>&1 < /dev/null &
