@@ -23,6 +23,7 @@ const (
 	cGreen   = "\x1b[38;2;59;192;137m"
 	cBgBar   = "\x1b[48;2;53;55;70m"
 	cSelBg   = "\x1b[48;2;64;50;70m"
+	cSelRow  = "\x1b[48;2;58;48;72m"
 	cBold    = "\x1b[1m"
 	altOn    = "\x1b[?1049h\x1b[H"
 	altOff   = "\x1b[?1049l"
@@ -155,24 +156,75 @@ func shortName(s string, n int) string {
 	return s
 }
 
+func glyphFor(r Node) string {
+	switch r.Kind {
+	case "OUTPUT":
+		if r.Muted {
+			return ""
+		}
+		return ""
+	case "INPUT":
+		if r.Muted {
+			return ""
+		}
+		return ""
+	case "SINK":
+		return ""
+	case "SOURCE":
+		return ""
+	case "STREAM":
+		if r.Muted {
+			return ""
+		}
+		return ""
+	}
+	return ""
+}
+
+
+func friendlyHero(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "bluez") || strings.Contains(n, "bluetooth"):
+		return "Bluetooth"
+	case strings.Contains(n, "hdmi") || strings.Contains(n, "displayport"):
+		return "HDMI"
+	case strings.Contains(n, "speaker"):
+		return "Speaker"
+	case strings.Contains(n, "headphone"):
+		return "Headphones"
+	case strings.Contains(n, "mic"):
+		return "Microphone"
+	}
+	parts := strings.Split(name, ".")
+	last := parts[len(parts)-1]
+	if len(last) > 24 {
+		last = last[:24]
+	}
+	return last
+}
+
 func render(rows []Node, cur int) string {
 	var b strings.Builder
 	b.WriteString(clearAll)
-	b.WriteString(cBold + cFg + "  Ember" + cReset + cDim + "  ·  +- volume · m mute · enter select/mute · r refresh · q quit" + cReset + "\n\n")
+	b.WriteString(cBold + cAccent + "  Ember" + cReset + cDim + "  ·  +- volume · m mute · enter select/mute · r refresh · q quit" + cReset + "\n\n")
 	lastKind := ""
 	for i, r := range rows {
 		if r.Kind != lastKind && r.Kind != "OUTPUT" && r.Kind != "INPUT" {
 			if r.Kind == "SINK" {
-				b.WriteString("\n" + cDim + "  OUTPUTS" + cReset + "\n")
+				b.WriteString("\n" + cBold + cFg + "  OUTPUTS" + cReset + "\n")
 			} else if r.Kind == "SOURCE" {
-				b.WriteString("\n" + cDim + "  INPUTS" + cReset + "\n")
+				b.WriteString("\n" + cBold + cFg + "  INPUTS" + cReset + "\n")
 			} else if r.Kind == "STREAM" {
-				b.WriteString("\n" + cDim + "  APPS" + cReset + "\n")
+				b.WriteString("\n" + cBold + cFg + "  APPS" + cReset + "\n")
 			}
 			lastKind = r.Kind
 		}
 		sel := i == cur
-		name := shortName(r.Name, 34)
+		name := shortName(r.Name, 30)
+		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
+			name = friendlyHero(r.Name)
+	}
 		vol := cGreen + bar(r.Pct) + cReset + cFg + fmt.Sprintf(" %3d%%", r.Pct) + cReset
 		if r.Muted {
 			vol = cMuted + bar(r.Pct) + fmt.Sprintf(" %3d%% MUTED", r.Pct) + cReset
@@ -181,14 +233,22 @@ func render(rows []Node, cur int) string {
 		if r.Active {
 			active = cAccent + " ●" + cReset
 		}
-		prefix := "  "
-		if sel {
-			prefix = cAccent + "▸ " + cReset
+		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
+			hero := "  " + glyphFor(r) + "  "
+			if sel {
+				hero = cSelRow + "▸ " + glyphFor(r) + "  "
+			}
+			fmt.Fprintf(&b, "%s%s%s%-32s %s%s\n", hero, cBold+cFg, cReset, name, vol, active)
+			if sel {
+				b.WriteString(cReset)
+			}
+			continue
 		}
-		fmt.Fprintf(&b, "%s%s%-36s %s%s\n", prefix, cFg, name, vol, active)
 		if sel {
-			b.WriteString(cReset)
+			fmt.Fprintf(&b, "%s▸ %s %-30s %s%s\n", cSelRow+cAccent, cReset+cSelRow+cFg, glyphFor(r)+" "+name, vol, active+cReset)
+			continue
 		}
+		fmt.Fprintf(&b, "  %s %-30s %s%s\n", cDim+glyphFor(r)+cReset, cFg+name, vol, active)
 	}
 	return b.String()
 }
