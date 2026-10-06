@@ -626,10 +626,13 @@ func (m model) View() string {
 		if r.Muted {
 			muteTag = " " + mutSt.Render("MUTED")
 		}
-		// pad the PLAIN name first (escape codes break fmt width), then style
+		// pad the PLAIN name first (escape codes break fmt width), then style.
+		// active (default) rows get the accent name — unmistakable, zero width cost.
 		padded := fmt.Sprintf("%-"+itoa(nameW)+"s", name)
 		var styledName string
-		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
+		if r.Active {
+			styledName = lipgloss.NewStyle().Foreground(cAccent).Bold(true).Render(padded)
+		} else if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
 			styledName = lipgloss.NewStyle().Foreground(cFg).Bold(true).Render(padded)
 		} else {
 			styledName = nameSt.Render(padded)
