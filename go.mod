@@ -1,4 +1,4 @@
-module ember
+module github.com/sherqo/ember
 
 go 1.27.1
 

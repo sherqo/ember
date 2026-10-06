@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,63 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// Backend scripts + tuning data are embedded so `go install` ships a
+// working app. On startup they are synced to XDG_DATA_HOME (or
+// ~/.local/share) and that bin dir is prepended to PATH.
+
+//go:embed bin/omarchy-* data
+var backendFS embed.FS
+
+func backendRoot() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "ember")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "ember")
+}
+
+// ensureBackend extracts embedded helpers when missing or changed.
+// Returns the bin dir to put on PATH.
+func ensureBackend() string {
+	root := backendRoot()
+	binDir := filepath.Join(root, "bin")
+	_ = os.MkdirAll(binDir, 0o755)
+	_ = os.MkdirAll(filepath.Join(root, "data"), 0o755)
+	_ = fs.WalkDir(backendFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || path == "." {
+			return nil
+		}
+		data, err := backendFS.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		dst := filepath.Join(root, path)
+		if cur, err := os.ReadFile(dst); err == nil && string(cur) == string(data) {
+			return nil // unchanged
+		}
+		_ = os.MkdirAll(filepath.Dir(dst), 0o755)
+		mode := os.FileMode(0o644)
+		if strings.HasPrefix(path, "bin/") {
+			mode = 0o755
+		}
+		_ = os.WriteFile(dst, data, mode)
+		return nil
+	})
+	return binDir
+}
+
+// hasNerdFont reports whether any Nerd Font is installed. Without one the
+// speaker/mic glyphs render as tofu, so the UI falls back to ASCII marks.
+func hasNerdFont() bool {
+	out, err := exec.Command("fc-list", ":", "family").Output()
+	if err != nil {
+		return true // assume present when fontconfig is missing
+	}
+	return strings.Contains(strings.ToLower(string(out)), "nerd")
+}
+
+var useASCII = false
 
 // Pink Cat Boo
 var (
@@ -227,6 +286,21 @@ func snapshot() []Node {
 }
 
 func glyphFor(n Node) string {
+	if useASCII {
+		switch n.Kind {
+		case "OUTPUT":
+			return "[o]"
+		case "INPUT":
+			return "[i]"
+		case "SINK":
+			return "[O]"
+		case "SOURCE":
+			return "[I]"
+		case "STREAM":
+			return "[*]"
+		}
+		return "-"
+	}
 	switch n.Kind {
 	case "OUTPUT":
 		if n.Muted {
@@ -372,8 +446,14 @@ func layoutWidths(termW int) (boxW, nameW, barW int) {
 }
 
 // absolute terminal column where the volume bar starts:
-// border(1) + pad(2) + prefix(2) + glyph(1) + space(1) + name + gap(2)
-func barCol(nameW int) int { return 9 + nameW }
+// border(1) + pad(2) + prefix(2) + glyph + space(1) + name + gap(2)
+func barCol(nameW int) int {
+	gw := 1
+	if useASCII {
+		gw = 3
+	}
+	return 3 + 2 + gw + 1 + nameW + 2
+}
 
 func volBar(pct, width int, muted bool) string {
 	if pct < 0 {
@@ -682,11 +762,15 @@ func (m model) View() string {
 func itoa(n int) string { return strconv.Itoa(n) }
 
 func main() {
-	// backend helpers live beside this binary; ensure they resolve anywhere
+	binDir := ensureBackend()
+	// backend helpers resolve deterministically: extracted copy first,
+	// then beside the binary (dev checkouts), then system PATH.
+	paths := []string{binDir}
 	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		os.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+		paths = append(paths, filepath.Dir(exe))
 	}
+	os.Setenv("PATH", strings.Join(paths, ":")+":"+os.Getenv("PATH"))
+	useASCII = !hasNerdFont() || os.Getenv("EMBER_ASCII") == "1"
 	if len(os.Args) > 1 && os.Args[1] == "--dump" {
 		for _, r := range snapshot() {
 			fmt.Printf("%s\t%s\t%s\t%d\t%v\n", r.Kind, r.ID, r.Name, r.Pct, r.Muted)
