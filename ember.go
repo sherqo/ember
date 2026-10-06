@@ -279,36 +279,99 @@ func shortName(s string, n int) string {
 	return s
 }
 
-// rowLineY maps a data-row index to its terminal line in View.
-// Layout: border(0) pad(1) title(2) hint(3) flash(4, always present) blank(5),
-// heroes from 6; each new section adds blank + header (+2).
-func rowLineY(rows []Node, idx int) int {
-	y := 6
+// rowAtY maps a terminal line back to a data-row index (-1 = none).
+
+func rowAtY(rows []Node, termW, termH, cursor, y int) int {
+	lines := contentLineKinds(rows)
+	maxH := availH(termH)
+	start := windowStart(len(lines), lineOf(lines, cursor), maxH)
+	pos := start + (y - 6)
+	if pos < start || pos >= start+maxH || pos < 0 || pos >= len(lines) {
+		return -1
+	}
+	return lines[pos]
+}
+
+// contentLineKinds returns per-content-line data-row index (-1 = header/blank filler).
+// Structure mirrors View exactly: heroes, then per section blank+header+rows.
+func contentLineKinds(rows []Node) []int {
+	var out []int
 	lastKind := ""
 	for i, r := range rows {
 		if r.Kind != lastKind && r.Kind != "OUTPUT" && r.Kind != "INPUT" {
-			y += 2
+			out = append(out, -1, -1) // blank + header
 			lastKind = r.Kind
 		}
-		if i == idx {
-			return y
-		}
-		y++
+		out = append(out, i)
 	}
-	return -1
+	return out
 }
 
-func rowAtY(rows []Node, y int) int {
-	for i := range rows {
-		if rowLineY(rows, i) == y {
-			return i
-		}
+func availH(termH int) int {
+	if termH <= 0 {
+		return 1 << 30
 	}
-	return -1
+	h := termH - 6 - 2
+	if h < 3 {
+		h = 3
+	}
+	return h
 }
 
-const barX0 = 37 // approx column where the 14-cell volume bar starts
-const barW = 14
+func lineOf(lines []int, idx int) int {
+	for pos, li := range lines {
+		if li == idx {
+			return pos
+		}
+	}
+	return 0
+}
+
+func windowStart(total, cursorPos, maxH int) int {
+	if total <= maxH {
+		return 0
+	}
+	s := cursorPos - maxH/2
+	if s < 0 {
+		s = 0
+	}
+	if s > total-maxH {
+		s = total - maxH
+	}
+	return s
+}
+
+// layoutWidths derives box, name and bar widths from the terminal width.
+// All render + mouse code uses this so clicks always line up.
+func layoutWidths(termW int) (boxW, nameW, barW int) {
+	boxW = termW - 2
+	if termW <= 0 {
+		boxW = 70
+	}
+	if boxW < 48 {
+		boxW = 48
+	}
+	if boxW > 110 {
+		boxW = 110
+	}
+	inner := boxW - 2 - 4 // border + horizontal padding
+	nameW = inner - 32
+	if nameW < 14 {
+		nameW = 14
+	}
+	if nameW > 30 {
+		nameW = 30
+	}
+	barW = inner - nameW - 17
+	if barW < 8 {
+		barW = 8
+	}
+	return boxW, nameW, barW
+}
+
+// absolute terminal column where the volume bar starts:
+// border(1) + pad(2) + prefix(2) + glyph(1) + space(1) + name + gap(2)
+func barCol(nameW int) int { return 9 + nameW }
 
 func volBar(pct, width int, muted bool) string {
 	if pct < 0 {
@@ -379,36 +442,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = string(msg)
 		return m, tickRefresh()
 	case tea.MouseMsg:
+		_, nameW, barW := layoutWidths(m.width)
+		barStart := barCol(nameW)
+		hit := func() int { return rowAtY(m.rows, m.width, m.height, m.cursor, msg.Y) }
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			if i := rowAtY(m.rows, msg.Y); i >= 0 {
+			if i := hit(); i >= 0 {
 				m.cursor = i
 			}
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				if n.Kind == "OUTPUT" {
-					go sh("omarchy-audio-output-volume", "+5")
-				} else {
-					go sh("wpctl", "set-volume", n.ID, "5%+")
-					m.rows[m.cursor].Pct += 5
+				go sh("wpctl", "set-volume", n.ID, "5%+")
+				m.rows[m.cursor].Pct += 5
+				if m.rows[m.cursor].Pct > 150 {
+					m.rows[m.cursor].Pct = 150
 				}
 			}
 		case tea.MouseButtonWheelDown:
-			if i := rowAtY(m.rows, msg.Y); i >= 0 {
+			if i := hit(); i >= 0 {
 				m.cursor = i
 			}
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				if n.Kind == "OUTPUT" {
-					go sh("omarchy-audio-output-volume", "-5")
-				} else {
-					go sh("wpctl", "set-volume", n.ID, "5%-")
-					m.rows[m.cursor].Pct -= 5
+				go sh("wpctl", "set-volume", n.ID, "5%-")
+				m.rows[m.cursor].Pct -= 5
+				if m.rows[m.cursor].Pct < 0 {
+					m.rows[m.cursor].Pct = 0
 				}
 			}
 		case tea.MouseButtonRight:
 			if msg.Action == tea.MouseActionPress {
-				if i := rowAtY(m.rows, msg.Y); i >= 0 {
+				if i := hit(); i >= 0 {
 					m.cursor = i
 					n := m.rows[i]
 					switch n.Kind {
@@ -428,16 +492,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
-				if i := rowAtY(m.rows, msg.Y); i >= 0 {
+				if i := hit(); i >= 0 {
 					m.cursor = i
 					// click on the bar sets absolute volume (panel slider behavior)
-					if msg.X >= barX0 && msg.X < barX0+barW && len(m.rows) > 0 {
-						v := (msg.X - barX0 + 1) * 100 / barW
+					if msg.X >= barStart && msg.X < barStart+barW && len(m.rows) > 0 {
+						v := (msg.X - barStart + 1) * 100 / barW
 						if v < 0 {
 							v = 0
 						}
-						if v > 100 {
-							v = 100
+						if v > 150 {
+							v = 150
 						}
 						n := m.rows[i]
 						go sh("wpctl", "set-volume", n.ID, strconv.Itoa(v)+"%")
@@ -482,21 +546,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "+", "=", "right", "l":
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				if n.Kind == "OUTPUT" {
-					go sh("omarchy-audio-output-volume", "+5")
-				} else {
-					go sh("wpctl", "set-volume", n.ID, "5%+")
-					m.rows[m.cursor].Pct += 5
+				// panel parity: up to 150% (backend script caps at 100)
+				go sh("wpctl", "set-volume", n.ID, "5%+")
+				m.rows[m.cursor].Pct += 5
+				if m.rows[m.cursor].Pct > 150 {
+					m.rows[m.cursor].Pct = 150
 				}
 			}
 		case "-", "_", "left", "h":
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				if n.Kind == "OUTPUT" {
-					go sh("omarchy-audio-output-volume", "-5")
-				} else {
-					go sh("wpctl", "set-volume", n.ID, "5%-")
-					m.rows[m.cursor].Pct -= 5
+				go sh("wpctl", "set-volume", n.ID, "5%-")
+				m.rows[m.cursor].Pct -= 5
+				if m.rows[m.cursor].Pct < 0 {
+					m.rows[m.cursor].Pct = 0
 				}
 			}
 		case "enter":
@@ -526,33 +589,30 @@ func (m model) View() string {
 	if len(m.rows) == 0 {
 		return boxSt.Render(titleSt.Render("Ember") + "\n\n" + subSt.Render("scanning PipeWire…"))
 	}
+	boxW, nameW, barW := layoutWidths(m.width)
 	var b strings.Builder
 	b.WriteString(titleSt.Render(" Ember ") + " " + helpSt.Render("↑↓move · ←→vol · m mute · enter select · q quit") + "\n")
-	b.WriteString(helpSt.Render("  click select · wheel volume · right-click mute") + "\n")
+	b.WriteString(helpSt.Render("  click select · wheel volume · right-click mute · max 150%") + "\n")
 	flash := " "
 	if m.flash != "" {
 		flash = "  " + lipgloss.NewStyle().Foreground(cBlue).Render(m.flash)
 	}
 	b.WriteString(flash + "\n\n")
-	lastKind := ""
-	for i, r := range m.rows {
-		if r.Kind != lastKind && r.Kind != "OUTPUT" && r.Kind != "INPUT" {
-			switch r.Kind {
-			case "SINK":
-				b.WriteString("\n" + headSt.Render("OUTPUTS") + "\n")
-			case "SOURCE":
-				b.WriteString("\n" + headSt.Render("INPUTS") + "\n")
-			case "STREAM":
-				b.WriteString("\n" + headSt.Render("APPS") + "\n")
-			}
-			lastKind = r.Kind
-		}
-		name := shortName(r.Name, 28)
+	// window content lines around the cursor when the terminal is short
+	lines := contentLineKinds(m.rows)
+	maxH := availH(m.height)
+	start := windowStart(len(lines), lineOf(lines, m.cursor), maxH)
+	end := start + maxH
+	if end > len(lines) {
+		end = len(lines)
+	}
+	renderRow := func(i int, r Node) {
+		name := shortName(r.Name, nameW)
 		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
 			name = friendlyHero(r.Name)
 		}
 		glyph := glyphFor(r)
-		vol := volBar(r.Pct, 14, r.Muted)
+		vol := volBar(r.Pct, barW, r.Muted)
 		pct := fmt.Sprintf("%3d%%", r.Pct)
 		active := ""
 		if r.Active {
@@ -562,9 +622,9 @@ func (m model) View() string {
 		if r.Muted {
 			muteTag = " " + mutSt.Render("MUTED")
 		}
-		line := fmt.Sprintf("%s %-28s  %s %s%s%s", glyph, nameSt.Render(name), vol, pctSt.Render(pct), active, muteTag)
+		line := fmt.Sprintf("%s %-"+itoa(nameW)+"s  %s %s%s%s", glyph, nameSt.Render(name), vol, pctSt.Render(pct), active, muteTag)
 		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
-			line = fmt.Sprintf("%s %-28s  %s %s%s%s", glyph, lipgloss.NewStyle().Foreground(cFg).Bold(true).Render(name), vol, pctSt.Render(pct), active, muteTag)
+			line = fmt.Sprintf("%s %-"+itoa(nameW)+"s  %s %s%s%s", glyph, lipgloss.NewStyle().Foreground(cFg).Bold(true).Render(name), vol, pctSt.Render(pct), active, muteTag)
 		}
 		if i == m.cursor {
 			b.WriteString(selSt.Render("▸ "+line) + "\n")
@@ -572,19 +632,42 @@ func (m model) View() string {
 			b.WriteString(dimSt.Render("  ") + line + "\n")
 		}
 	}
+	for pos := start; pos < end; pos++ {
+		li := lines[pos]
+		if li < 0 {
+			// -1 entries come in blank+header pairs; render accordingly
+			if pos+1 < len(lines) && lines[pos+1] < 0 {
+				b.WriteString("\n")
+			} else {
+				kind := ""
+				for q := pos + 1; q < len(lines); q++ {
+					if lines[q] >= 0 {
+						kind = m.rows[lines[q]].Kind
+						break
+					}
+				}
+				switch kind {
+				case "SINK":
+					b.WriteString(headSt.Render("OUTPUTS") + "\n")
+				case "SOURCE":
+					b.WriteString(headSt.Render("INPUTS") + "\n")
+				case "STREAM":
+					b.WriteString(headSt.Render("APPS") + "\n")
+				default:
+					b.WriteString("\n")
+				}
+			}
+			continue
+		}
+		renderRow(li, m.rows[li])
+	}
 	if m.err != "" {
 		b.WriteString("\n" + lipgloss.NewStyle().Foreground(cYellow).Render(m.err) + "\n")
 	}
-	w := m.width - 4
-	if w < 52 {
-		w = 64
-	}
-	if w > 78 {
-		w = 78
-	}
-	_ = dimSt
-	return boxSt.Width(w).Render(b.String())
+	return boxSt.Width(boxW).Render(b.String())
 }
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 func main() {
 	// backend helpers live beside this binary; ensure they resolve anywhere
