@@ -16,24 +16,26 @@ import (
 
 // Pink Cat Boo
 var (
-	cBg     = lipgloss.Color("#202330")
-	cFg     = lipgloss.Color("#FFF0F5")
-	cAccent = lipgloss.Color("#FF4C7A")
-	cMuted  = lipgloss.Color("#565970")
-	cDim    = lipgloss.Color("#8A8DA3")
-	cGreen  = lipgloss.Color("#3BC089")
-	cBlue   = lipgloss.Color("#6767CE")
-	cYellow = lipgloss.Color("#FEC831")
-	titleSt = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	subSt   = lipgloss.NewStyle().Foreground(cDim)
-	nameSt  = lipgloss.NewStyle().Foreground(cFg)
-	dimSt   = lipgloss.NewStyle().Foreground(cMuted)
-	selSt   = lipgloss.NewStyle().Foreground(cFg).Background(lipgloss.Color("#3A3048")).Bold(true)
-	headSt  = lipgloss.NewStyle().Foreground(cFg).Bold(true).MarginTop(1)
-	boxSt   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cMuted).Padding(1, 2).Background(cBg)
-	helpSt  = lipgloss.NewStyle().Foreground(cMuted)
-	pctSt   = lipgloss.NewStyle().Foreground(cFg).Width(5).Align(lipgloss.Right)
-	mutSt   = lipgloss.NewStyle().Foreground(cYellow).Bold(true)
+	cBg           = lipgloss.Color("#202330")
+	cFg           = lipgloss.Color("#FFF0F5")
+	cAccent       = lipgloss.Color("#FF4C7A")
+	cMuted        = lipgloss.Color("#565970")
+	cDim          = lipgloss.Color("#8A8DA3")
+	cGreen        = lipgloss.Color("#3BC089")
+	cBlue         = lipgloss.Color("#6767CE")
+	cYellow       = lipgloss.Color("#FEC831")
+	titleSt       = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
+	subSt         = lipgloss.NewStyle().Foreground(cDim)
+	nameSt        = lipgloss.NewStyle().Foreground(cFg)
+	dimSt         = lipgloss.NewStyle().Foreground(cMuted)
+	selSt         = lipgloss.NewStyle().Foreground(cFg).Background(lipgloss.Color("#3A3048")).Bold(true)
+	glyphActiveSt = lipgloss.NewStyle().Foreground(cAccent)
+	glyphDimSt    = lipgloss.NewStyle().Foreground(cDim)
+	headSt        = lipgloss.NewStyle().Foreground(cFg).Bold(true).MarginTop(1)
+	boxSt         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cMuted).Padding(1, 2).Background(cBg)
+	helpSt        = lipgloss.NewStyle().Foreground(cMuted)
+	pctSt         = lipgloss.NewStyle().Foreground(cFg).Width(5).Align(lipgloss.Right)
+	mutSt         = lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 )
 
 type Node struct {
@@ -611,21 +613,28 @@ func (m model) View() string {
 		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
 			name = friendlyHero(r.Name)
 		}
+		// active marker lives IN the glyph (accent color) — zero extra cells
 		glyph := glyphFor(r)
+		if r.Active {
+			glyph = glyphActiveSt.Render(glyph)
+		} else {
+			glyph = glyphDimSt.Render(glyph)
+		}
 		vol := volBar(r.Pct, barW, r.Muted)
 		pct := fmt.Sprintf("%3d%%", r.Pct)
-		active := ""
-		if r.Active {
-			active = lipgloss.NewStyle().Foreground(cAccent).Render(" ●")
-		}
 		muteTag := ""
 		if r.Muted {
 			muteTag = " " + mutSt.Render("MUTED")
 		}
-		line := fmt.Sprintf("%s %-"+itoa(nameW)+"s  %s %s%s%s", glyph, nameSt.Render(name), vol, pctSt.Render(pct), active, muteTag)
+		// pad the PLAIN name first (escape codes break fmt width), then style
+		padded := fmt.Sprintf("%-"+itoa(nameW)+"s", name)
+		var styledName string
 		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
-			line = fmt.Sprintf("%s %-"+itoa(nameW)+"s  %s %s%s%s", glyph, lipgloss.NewStyle().Foreground(cFg).Bold(true).Render(name), vol, pctSt.Render(pct), active, muteTag)
+			styledName = lipgloss.NewStyle().Foreground(cFg).Bold(true).Render(padded)
+		} else {
+			styledName = nameSt.Render(padded)
 		}
+		line := fmt.Sprintf("%s %s  %s %s%s", glyph, styledName, vol, pctSt.Render(pct), muteTag)
 		if i == m.cursor {
 			b.WriteString(selSt.Render("▸ "+line) + "\n")
 		} else {
