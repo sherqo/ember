@@ -1,50 +1,57 @@
-// Ember — warm little audio mixer (Go TUI, stdlib only).
-// Mirrors the Omarchy audio panel order: hero, mic, outputs, inputs, apps.
-// Keys: up/down or j/k move · left/right or -/+ volume · m mute ·
-// enter select/mute · r refresh · q/esc quit.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Pink Cat Boo
-const (
-	cReset   = "\x1b[0m"
-	cFg      = "\x1b[38;2;255;240;245m"
-	cAccent  = "\x1b[38;2;255;76;122m"
-	cMuted   = "\x1b[38;2;86;89;112m"
-	cDim     = "\x1b[38;2;120;124;150m"
-	cGreen   = "\x1b[38;2;59;192;137m"
-	cBgBar   = "\x1b[48;2;53;55;70m"
-	cSelBg   = "\x1b[48;2;64;50;70m"
-	cSelRow  = "\x1b[48;2;58;48;72m"
-	cBold    = "\x1b[1m"
-	altOn    = "\x1b[?1049h\x1b[H"
-	altOff   = "\x1b[?1049l"
-	hideCur  = "\x1b[?25l"
-	showCur  = "\x1b[?25h"
-	clearAll = "\x1b[H\x1b[2J"
+var (
+	cBg     = lipgloss.Color("#202330")
+	cFg     = lipgloss.Color("#FFF0F5")
+	cAccent = lipgloss.Color("#FF4C7A")
+	cMuted  = lipgloss.Color("#565970")
+	cDim    = lipgloss.Color("#8A8DA3")
+	cGreen  = lipgloss.Color("#3BC089")
+	cBlue   = lipgloss.Color("#6767CE")
+	cYellow = lipgloss.Color("#FEC831")
+	titleSt = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
+	subSt   = lipgloss.NewStyle().Foreground(cDim)
+	nameSt  = lipgloss.NewStyle().Foreground(cFg)
+	dimSt   = lipgloss.NewStyle().Foreground(cMuted)
+	selSt   = lipgloss.NewStyle().Foreground(cFg).Background(lipgloss.Color("#3A3048")).Bold(true)
+	headSt  = lipgloss.NewStyle().Foreground(cFg).Bold(true).MarginTop(1)
+	boxSt   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cMuted).Padding(1, 2).Background(cBg)
+	helpSt  = lipgloss.NewStyle().Foreground(cMuted)
+	pctSt   = lipgloss.NewStyle().Foreground(cFg).Width(5).Align(lipgloss.Right)
+	mutSt   = lipgloss.NewStyle().Foreground(cYellow).Bold(true)
 )
 
 type Node struct {
 	ID     string
 	Name   string
-	Kind   string // OUTPUT, INPUT, SINK, SOURCE, STREAM
+	Kind   string
 	Pct    int
 	Muted  bool
 	Active bool
 }
 
-func sh(args ...string) string {
-	out, _ := exec.Command(args[0], args[1:]...).Output()
+func runCtx(timeout time.Duration, name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, name, args...).Output()
 	return string(out)
 }
+
+func sh(args ...string) string { return runCtx(2*time.Second, args[0], args[1:]...) }
 
 func volOf(id string) (int, bool) {
 	out := sh("wpctl", "get-volume", id)
@@ -53,8 +60,7 @@ func volOf(id string) (int, bool) {
 		return 0, false
 	}
 	v, _ := strconv.ParseFloat(f[1], 64)
-	muted := strings.Contains(out, "MUTED")
-	return int(v*100 + 0.5), muted
+	return int(v*100 + 0.5), strings.Contains(out, "MUTED")
 }
 
 func sectionNodes(status, section string) [][2]string {
@@ -70,17 +76,13 @@ func sectionNodes(status, section string) [][2]string {
 		if !inSec || t == "" || !strings.HasPrefix(t, "│") {
 			continue
 		}
-		// match "│  60. Name [vol: x]"
 		s := strings.TrimLeft(t, "│ ")
 		dot := strings.Index(s, ".")
 		if dot < 0 {
 			continue
 		}
 		id := strings.TrimSpace(s[:dot])
-		if _, err := strconv.Atoi(id); err != nil {
-			continue
-		}
-		if seen[id] {
+		if _, err := strconv.Atoi(id); err != nil || seen[id] {
 			continue
 		}
 		seen[id] = true
@@ -93,16 +95,18 @@ func sectionNodes(status, section string) [][2]string {
 	return res
 }
 
-func bar(pct int) string {
-	const w = 16
-	if pct < 0 {
-		pct = 0
+func nodeIDByName(status, name string) string {
+	for _, line := range strings.Split(status, "\n") {
+		if name != "" && strings.Contains(line, name) {
+			s := strings.TrimLeft(strings.TrimSpace(line), "│ ")
+			if dot := strings.Index(s, "."); dot > 0 {
+				if _, err := strconv.Atoi(strings.TrimSpace(s[:dot])); err == nil {
+					return strings.TrimSpace(s[:dot])
+				}
+			}
+		}
 	}
-	if pct > 100 {
-		pct = 100
-	}
-	n := pct * w / 100
-	return strings.Repeat("█", n) + strings.Repeat("░", w-n)
+	return ""
 }
 
 func snapshot() []Node {
@@ -110,15 +114,11 @@ func snapshot() []Node {
 	defSink := strings.TrimSpace(sh("pactl", "get-default-sink"))
 	defSrc := strings.TrimSpace(sh("pactl", "get-default-source"))
 	var rows []Node
-
 	p, m := volOf("@DEFAULT_AUDIO_SINK@")
 	rows = append(rows, Node{"@DEFAULT_AUDIO_SINK@", defSink, "OUTPUT", p, m, true})
 	p, m = volOf("@DEFAULT_AUDIO_SOURCE@")
 	rows = append(rows, Node{"@DEFAULT_AUDIO_SOURCE@", defSrc, "INPUT", p, m, true})
-
 	defID := nodeIDByName(status, defSink)
-	defSrcID := nodeIDByName(status, defSrc)
-	_ = defSrcID
 	for _, nn := range sectionNodes(status, "Sinks") {
 		p, m := volOf(nn[0])
 		rows = append(rows, Node{nn[0], nn[1], "SINK", p, m, nn[0] == defID})
@@ -134,53 +134,27 @@ func snapshot() []Node {
 	return rows
 }
 
-func nodeIDByName(status, name string) string {
-	for _, line := range strings.Split(status, "\n") {
-		if strings.Contains(line, name) {
-			s := strings.TrimLeft(strings.TrimSpace(line), "│ ")
-			if dot := strings.Index(s, "."); dot > 0 {
-				if _, err := strconv.Atoi(strings.TrimSpace(s[:dot])); err == nil {
-					return strings.TrimSpace(s[:dot])
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func shortName(s string, n int) string {
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n-1]) + "…"
-	}
-	return s
-}
-
-func glyphFor(r Node) string {
-	switch r.Kind {
+func glyphFor(n Node) string {
+	switch n.Kind {
 	case "OUTPUT":
-		if r.Muted {
-			return ""
+		if n.Muted {
+			return ""
 		}
-		return ""
+		return ""
 	case "INPUT":
-		if r.Muted {
-			return ""
+		if n.Muted {
+			return ""
 		}
-		return ""
+		return ""
 	case "SINK":
-		return ""
+		return ""
 	case "SOURCE":
-		return ""
+		return ""
 	case "STREAM":
-		if r.Muted {
-			return ""
-		}
-		return ""
+		return ""
 	}
-	return ""
+	return "•"
 }
-
 
 func friendlyHero(name string) string {
 	n := strings.ToLower(name)
@@ -198,126 +172,207 @@ func friendlyHero(name string) string {
 	}
 	parts := strings.Split(name, ".")
 	last := parts[len(parts)-1]
-	if len(last) > 24 {
-		last = last[:24]
+	if len(last) > 26 {
+		last = last[:26]
+	}
+	if last == "" {
+		return name
 	}
 	return last
 }
 
-func render(rows []Node, cur int) string {
+func shortName(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
+func volBar(pct, width int, muted bool) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 150 {
+		pct = 150
+	}
+	fill := pct * width / 100
+	if fill > width {
+		fill = width
+	}
+	fg := cGreen
+	if muted {
+		fg = cMuted
+	}
+	f := lipgloss.NewStyle().Foreground(fg).Render(strings.Repeat("━", fill))
+	e := lipgloss.NewStyle().Foreground(cMuted).Render(strings.Repeat("━", width-fill))
+	return f + e
+}
+
+type model struct {
+	rows   []Node
+	cursor int
+	width  int
+	height int
+	err    string
+	flash  string
+}
+
+type refreshMsg []Node
+type errMsg string
+
+func doSnapshot() tea.Msg {
+	// never block UI more than ~3s; snapshot uses 2s timeouts per call
+	return refreshMsg(snapshot())
+}
+
+func tickRefresh() tea.Cmd {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg { return doSnapshot() })
+}
+
+func (m model) Init() tea.Cmd { return tickRefresh() }
+
+func clampCursor(m *model) {
+	if len(m.rows) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.rows) {
+		m.cursor = len(m.rows) - 1
+	}
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+	case refreshMsg:
+		m.rows = []Node(msg)
+		clampCursor(&m)
+		return m, tickRefresh()
+	case errMsg:
+		m.err = string(msg)
+		return m, tickRefresh()
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "esc", "ctrl+c":
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.rows)-1 {
+				m.cursor++
+			}
+		case "r":
+			return m, func() tea.Msg { return doSnapshot() }
+		case "m":
+			if len(m.rows) > 0 {
+				n := m.rows[m.cursor]
+				go sh("wpctl", "set-mute", n.ID, "toggle")
+				m.flash = "toggled mute"
+			}
+			return m, func() tea.Msg {
+				time.Sleep(250 * time.Millisecond)
+				return doSnapshot()
+			}
+		case "+", "=", "right", "l":
+			if len(m.rows) > 0 {
+				n := m.rows[m.cursor]
+				go sh("wpctl", "set-volume", n.ID, "5%+")
+				m.rows[m.cursor].Pct += 5
+			}
+		case "-", "_", "left", "h":
+			if len(m.rows) > 0 {
+				n := m.rows[m.cursor]
+				go sh("wpctl", "set-volume", n.ID, "5%-")
+				m.rows[m.cursor].Pct -= 5
+			}
+		case "enter":
+			if len(m.rows) > 0 {
+				n := m.rows[m.cursor]
+				switch n.Kind {
+				case "SINK", "SOURCE":
+					go sh("wpctl", "set-default", n.ID)
+					m.flash = "default → " + shortName(n.Name, 30)
+				default:
+					go sh("wpctl", "set-mute", n.ID, "toggle")
+				}
+				return m, func() tea.Msg {
+					time.Sleep(300 * time.Millisecond)
+					return doSnapshot()
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m model) View() string {
+	if len(m.rows) == 0 {
+		return boxSt.Render(titleSt.Render("Ember") + "\n\n" + subSt.Render("scanning PipeWire…"))
+	}
 	var b strings.Builder
-	b.WriteString(clearAll)
-	b.WriteString(cBold + cAccent + "  Ember" + cReset + cDim + "  ·  +- volume · m mute · enter select/mute · r refresh · q quit" + cReset + "\n\n")
+	b.WriteString(titleSt.Render(" Ember ") + " " + helpSt.Render("↑↓ move · ←→ vol · m mute · enter ok · q quit"))
+	if m.flash != "" {
+		b.WriteString("  " + lipgloss.NewStyle().Foreground(cBlue).Render(m.flash))
+	}
+	b.WriteString("\n\n")
 	lastKind := ""
-	for i, r := range rows {
+	for i, r := range m.rows {
 		if r.Kind != lastKind && r.Kind != "OUTPUT" && r.Kind != "INPUT" {
-			if r.Kind == "SINK" {
-				b.WriteString("\n" + cBold + cFg + "  OUTPUTS" + cReset + "\n")
-			} else if r.Kind == "SOURCE" {
-				b.WriteString("\n" + cBold + cFg + "  INPUTS" + cReset + "\n")
-			} else if r.Kind == "STREAM" {
-				b.WriteString("\n" + cBold + cFg + "  APPS" + cReset + "\n")
+			switch r.Kind {
+			case "SINK":
+				b.WriteString("\n" + headSt.Render("OUTPUTS") + "\n")
+			case "SOURCE":
+				b.WriteString("\n" + headSt.Render("INPUTS") + "\n")
+			case "STREAM":
+				b.WriteString("\n" + headSt.Render("APPS") + "\n")
 			}
 			lastKind = r.Kind
 		}
-		sel := i == cur
-		name := shortName(r.Name, 30)
+		name := shortName(r.Name, 28)
 		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
 			name = friendlyHero(r.Name)
-	}
-		vol := cGreen + bar(r.Pct) + cReset + cFg + fmt.Sprintf(" %3d%%", r.Pct) + cReset
-		if r.Muted {
-			vol = cMuted + bar(r.Pct) + fmt.Sprintf(" %3d%% MUTED", r.Pct) + cReset
 		}
+		glyph := glyphFor(r)
+		vol := volBar(r.Pct, 14, r.Muted)
+		pct := fmt.Sprintf("%3d%%", r.Pct)
 		active := ""
 		if r.Active {
-			active = cAccent + " ●" + cReset
+			active = lipgloss.NewStyle().Foreground(cAccent).Render(" ●")
 		}
+		muteTag := ""
+		if r.Muted {
+			muteTag = " " + mutSt.Render("MUTED")
+		}
+		line := fmt.Sprintf("%s %-28s  %s %s%s%s", glyph, nameSt.Render(name), vol, pctSt.Render(pct), active, muteTag)
 		if r.Kind == "OUTPUT" || r.Kind == "INPUT" {
-			hero := "  " + glyphFor(r) + "  "
-			if sel {
-				hero = cSelRow + "▸ " + glyphFor(r) + "  "
-			}
-			fmt.Fprintf(&b, "%s%s%s%-32s %s%s\n", hero, cBold+cFg, cReset, name, vol, active)
-			if sel {
-				b.WriteString(cReset)
-			}
-			continue
+			line = fmt.Sprintf("%s %-28s  %s %s%s%s", glyph, lipgloss.NewStyle().Foreground(cFg).Bold(true).Render(name), vol, pctSt.Render(pct), active, muteTag)
 		}
-		if sel {
-			fmt.Fprintf(&b, "%s▸ %s %-30s %s%s\n", cSelRow+cAccent, cReset+cSelRow+cFg, glyphFor(r)+" "+name, vol, active+cReset)
-			continue
+		if i == m.cursor {
+			b.WriteString(selSt.Render("▸ "+line) + "\n")
+		} else {
+			b.WriteString(dimSt.Render("  ") + line + "\n")
 		}
-		fmt.Fprintf(&b, "  %s %-30s %s%s\n", cDim+glyphFor(r)+cReset, cFg+name, vol, active)
 	}
-	return b.String()
-}
-
-var tty *os.File
-
-func rawOn() {
-	tty, _ = os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	exec.Command("stty", "-F", "/dev/tty", "cbreak", "min", "1", "-echo").Run()
-	fmt.Print(altOn + hideCur)
-}
-
-func rawOff() {
-	fmt.Print(showCur + altOff)
-	exec.Command("stty", "-F", "/dev/tty", "sane").Run()
-	if tty != nil {
-		tty.Close()
+	if m.err != "" {
+		b.WriteString("\n" + lipgloss.NewStyle().Foreground(cYellow).Render(m.err) + "\n")
 	}
-}
-
-func readKey() string {
-	buf := make([]byte, 8)
-	n, _ := tty.Read(buf)
-	if n == 0 {
-		return ""
+	w := m.width - 4
+	if w < 52 {
+		w = 64
 	}
-	if buf[0] == 0x1b {
-		if n == 1 {
-			return "esc"
-		}
-		switch string(buf[1:n]) {
-		case "[A":
-			return "up"
-		case "[B":
-			return "down"
-		case "[C":
-			return "right"
-		case "[D":
-			return "left"
-		}
-		return "esc"
+	if w > 78 {
+		w = 78
 	}
-	switch buf[0] {
-	case 'q', 'Q':
-		return "quit"
-	case 'r', 'R':
-		return "refresh"
-	case 'm', 'M':
-		return "mute"
-	case '+', '=':
-		return "up-vol"
-	case '-', '_':
-		return "down-vol"
-	case '\r', '\n':
-		return "enter"
-	case 'j':
-		return "down"
-	case 'k':
-		return "up"
-	case 'h':
-		return "left"
-	case 'l':
-		return "right"
-	}
-	return ""
-}
-
-func adjust(id string, delta string) {
-	exec.Command("wpctl", "set-volume", id, delta).Run()
+	_ = dimSt
+	return boxSt.Width(w).Render(b.String())
 }
 
 func main() {
@@ -327,71 +382,10 @@ func main() {
 		}
 		return
 	}
-	rows := snapshot()
-	cur := 0
-	rawOn()
-	defer rawOff()
-	fmt.Print(render(rows, cur))
-
-	tick := time.NewTicker(2 * time.Second)
-	defer tick.Stop()
-	keych := make(chan string, 8)
-	go func() {
-		for {
-			keych <- readKey()
-		}
-	}()
-
-	for {
-		select {
-		case k := <-keych:
-			switch k {
-			case "quit", "esc":
-				return
-			case "refresh":
-				rows = snapshot()
-			case "up":
-				if cur > 0 {
-					cur--
-				}
-			case "down":
-				if cur < len(rows)-1 {
-					cur++
-				}
-			case "up-vol", "right":
-				if cur < len(rows) {
-					adjust(rows[cur].ID, "5%+")
-					rows = snapshot()
-				}
-			case "down-vol", "left":
-				if cur < len(rows) {
-					adjust(rows[cur].ID, "5%-")
-					rows = snapshot()
-				}
-			case "mute":
-				if cur < len(rows) {
-					exec.Command("wpctl", "set-mute", rows[cur].ID, "toggle").Run()
-					rows = snapshot()
-				}
-			case "enter":
-				if cur < len(rows) {
-					r := rows[cur]
-					switch r.Kind {
-					case "SINK", "SOURCE":
-						exec.Command("wpctl", "set-default", r.ID).Run()
-					default:
-						exec.Command("wpctl", "set-mute", r.ID, "toggle").Run()
-					}
-					rows = snapshot()
-				}
-			}
-			fmt.Print(render(rows, cur))
-		case <-tick.C:
-			rows = snapshot()
-			if cur >= len(rows) && len(rows) > 0 {
-				cur = len(rows) - 1
-			}
-			fmt.Print(render(rows, cur))
-		}
+	m := model{rows: snapshot(), cursor: 0}
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "ember:", err)
+		os.Exit(1)
 	}
 }
