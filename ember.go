@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +38,8 @@ var (
 
 type Node struct {
 	ID     string
-	Name   string
+	Raw    string // PipeWire node.name (for set-default scripts)
+	Name   string // friendly display label
 	Kind   string
 	Pct    int
 	Muted  bool
@@ -177,10 +179,12 @@ func snapshot() []Node {
 	}
 	var rows []Node
 	p, m := volOf("@DEFAULT_AUDIO_SINK@")
-	rows = append(rows, Node{"@DEFAULT_AUDIO_SINK@", defSink, "OUTPUT", p, m, true})
+	rows = append(rows, Node{"@DEFAULT_AUDIO_SINK@", defSink, defSink, "OUTPUT", p, m, true})
 	p, m = volOf("@DEFAULT_AUDIO_SOURCE@")
-	rows = append(rows, Node{"@DEFAULT_AUDIO_SOURCE@", defSrc, "INPUT", p, m, true})
+	rows = append(rows, Node{"@DEFAULT_AUDIO_SOURCE@", defSrc, defSrc, "INPUT", p, m, true})
 	defID := nodeIDByName(status, defSink)
+	// Omarchy parity: mark streams belonging to the active MPRIS player.
+	activePlayer := strings.ToLower(strings.TrimSpace(sh("playerctl", "metadata", "--format", "{{playerName}}")))
 	for _, nn := range sectionNodes(status, "Sinks") {
 		nname := nodeName[nn[0]]
 		if nname == "" {
@@ -197,11 +201,16 @@ func snapshot() []Node {
 			}
 		}
 		p, m := volOf(nn[0])
-		rows = append(rows, Node{nn[0], labelOf(nn[0], nn[1]), "SINK", p, m, nn[0] == defID})
+		rows = append(rows, Node{nn[0], nname, labelOf(nn[0], nn[1]), "SINK", p, m, nn[0] == defID})
 	}
 	for _, nn := range sectionNodes(status, "Sources") {
 		p, m := volOf(nn[0])
-		rows = append(rows, Node{nn[0], labelOf(nn[0], nn[1]), "SOURCE", p, m, false})
+		nname := nodeName[nn[0]]
+		if nname == "" {
+			nname = inspectField(nn[0], "node.name")
+			nodeName[nn[0]] = nname
+		}
+		rows = append(rows, Node{nn[0], nname, labelOf(nn[0], nn[1]), "SOURCE", p, m, false})
 	}
 	for _, nn := range sectionNodes(status, "Streams") {
 		// skip endpoint sub-rows ("out_FL > sink:playback_FL"); keep app rows
@@ -209,7 +218,8 @@ func snapshot() []Node {
 			continue
 		}
 		p, m := volOf(nn[0])
-		rows = append(rows, Node{nn[0], friendlyDeviceLabel(nn[1]), "STREAM", p, m, false})
+		active := activePlayer != "" && strings.Contains(strings.ToLower(nn[1]), activePlayer)
+		rows = append(rows, Node{nn[0], "", friendlyDeviceLabel(nn[1]), "STREAM", p, m, active})
 	}
 	return rows
 }
@@ -354,8 +364,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "m":
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				go sh("wpctl", "set-mute", n.ID, "toggle")
-				m.flash = "toggled mute"
+				switch n.Kind {
+				case "OUTPUT":
+					go sh("omarchy-audio-output-volume", "mute-toggle")
+					m.flash = "toggled mute"
+				case "INPUT":
+					go sh("omarchy-audio-input-mute")
+					m.flash = "toggled mic"
+				default:
+					go sh("wpctl", "set-mute", n.ID, "toggle")
+					m.flash = "toggled mute"
+				}
 			}
 			return m, func() tea.Msg {
 				time.Sleep(250 * time.Millisecond)
@@ -364,22 +383,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "+", "=", "right", "l":
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				go sh("wpctl", "set-volume", n.ID, "5%+")
-				m.rows[m.cursor].Pct += 5
+				if n.Kind == "OUTPUT" {
+					go sh("omarchy-audio-output-volume", "+5")
+				} else {
+					go sh("wpctl", "set-volume", n.ID, "5%+")
+					m.rows[m.cursor].Pct += 5
+				}
 			}
 		case "-", "_", "left", "h":
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
-				go sh("wpctl", "set-volume", n.ID, "5%-")
-				m.rows[m.cursor].Pct -= 5
+				if n.Kind == "OUTPUT" {
+					go sh("omarchy-audio-output-volume", "-5")
+				} else {
+					go sh("wpctl", "set-volume", n.ID, "5%-")
+					m.rows[m.cursor].Pct -= 5
+				}
 			}
 		case "enter":
 			if len(m.rows) > 0 {
 				n := m.rows[m.cursor]
 				switch n.Kind {
-				case "SINK", "SOURCE":
-					go sh("wpctl", "set-default", n.ID)
+				case "SINK":
+					go sh("omarchy-audio-output-set-default", n.ID, n.Raw)
 					m.flash = "default → " + shortName(n.Name, 30)
+				case "SOURCE":
+					go sh("omarchy-audio-input-set-default", n.ID, n.Raw)
+					m.flash = "input → " + shortName(n.Name, 30)
+				case "OUTPUT":
+					go sh("omarchy-audio-output-volume", "mute-toggle")
+				case "INPUT":
+					go sh("omarchy-audio-input-mute")
 				default:
 					go sh("wpctl", "set-mute", n.ID, "toggle")
 				}
@@ -456,6 +490,11 @@ func (m model) View() string {
 }
 
 func main() {
+	// backend helpers live beside this binary; ensure they resolve anywhere
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		os.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--dump" {
 		for _, r := range snapshot() {
 			fmt.Printf("%s\t%s\t%s\t%d\t%v\n", r.Kind, r.ID, r.Name, r.Pct, r.Muted)
