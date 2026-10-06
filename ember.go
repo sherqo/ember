@@ -69,14 +69,18 @@ func sectionNodes(status, section string) [][2]string {
 	inSec := false
 	for _, line := range strings.Split(status, "\n") {
 		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "├─") {
+		// section headers use either ├─ or └─ tree branches
+		if strings.HasPrefix(t, "├─") || strings.HasPrefix(t, "└─") {
 			inSec = strings.Contains(t, section)
 			continue
 		}
-		if !inSec || t == "" || !strings.HasPrefix(t, "│") {
+		if !inSec || t == "" {
 			continue
 		}
+		// node lines: "│  60. Name [vol: x]" or bare "140. App" (streams);
+		// a leading "*" marks the default node — strip it before parsing.
 		s := strings.TrimLeft(t, "│ ")
+		s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "*"))
 		dot := strings.Index(s, ".")
 		if dot < 0 {
 			continue
@@ -90,9 +94,34 @@ func sectionNodes(status, section string) [][2]string {
 		if i := strings.Index(name, " [vol:"); i >= 0 {
 			name = name[:i]
 		}
+		if i := strings.Index(name, "\t"); i >= 0 {
+			name = strings.TrimSpace(name[:i])
+		}
+		if name == "" {
+			continue
+		}
 		res = append(res, [2]string{id, name})
 	}
 	return res
+}
+
+func friendlyDeviceLabel(text string) string {
+	label := strings.TrimSpace(text)
+	stripPrefix := []string{"sof-soundwire ", "built-in audio ", "built in audio "}
+	lower := strings.ToLower(label)
+	for _, p := range stripPrefix {
+		if strings.HasPrefix(lower, p) {
+			label = strings.TrimSpace(label[len(p):])
+			lower = strings.ToLower(label)
+		}
+	}
+	for _, suf := range []string{" Output", " Input", " output", " input"} {
+		if strings.HasSuffix(label, suf) {
+			label = strings.TrimSpace(label[:len(label)-len(suf)])
+		}
+	}
+	label = strings.ReplaceAll(label, "Microphones", "Microphone")
+	return label
 }
 
 func nodeIDByName(status, name string) string {
@@ -109,10 +138,43 @@ func nodeIDByName(status, name string) string {
 	return ""
 }
 
+func inspectField(id, field string) string {
+	out := sh("wpctl", "inspect", id)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "* ")
+		if strings.HasPrefix(line, field+" = ") {
+			v := strings.TrimSpace(strings.TrimPrefix(line, field+" = "))
+			return strings.Trim(v, "\"")
+		}
+	}
+	return ""
+}
+
 func snapshot() []Node {
 	status := sh("wpctl", "status")
 	defSink := strings.TrimSpace(sh("pactl", "get-default-sink"))
 	defSrc := strings.TrimSpace(sh("pactl", "get-default-source"))
+	// Omarchy abstraction: only available outputs are selectable.
+	avail := map[string]bool{}
+	for _, line := range strings.Split(sh("omarchy-audio-sink-availability"), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) >= 2 {
+			avail[strings.TrimSpace(f[0])] = strings.TrimSpace(f[1]) != "0"
+		}
+	}
+	nodeName := map[string]string{}
+	labelOf := func(id, fallback string) string {
+		nname := inspectField(id, "node.name")
+		nodeName[id] = nname
+		if nick := inspectField(id, "node.nick"); nick != "" {
+			return nick
+		}
+		if desc := friendlyDeviceLabel(inspectField(id, "node.description")); desc != "" {
+			return desc
+		}
+		return friendlyDeviceLabel(fallback)
+	}
 	var rows []Node
 	p, m := volOf("@DEFAULT_AUDIO_SINK@")
 	rows = append(rows, Node{"@DEFAULT_AUDIO_SINK@", defSink, "OUTPUT", p, m, true})
@@ -120,16 +182,34 @@ func snapshot() []Node {
 	rows = append(rows, Node{"@DEFAULT_AUDIO_SOURCE@", defSrc, "INPUT", p, m, true})
 	defID := nodeIDByName(status, defSink)
 	for _, nn := range sectionNodes(status, "Sinks") {
+		nname := nodeName[nn[0]]
+		if nname == "" {
+			nname = inspectField(nn[0], "node.name")
+			nodeName[nn[0]] = nname
+		}
+		if nname == defSink {
+			defID = nn[0]
+		}
+		if !avail[nname] && nn[0] != defID {
+			lower := strings.ToLower(nname + " " + nn[1])
+			if !strings.Contains(lower, "bluez") && !strings.Contains(lower, "bluetooth") {
+				continue
+			}
+		}
 		p, m := volOf(nn[0])
-		rows = append(rows, Node{nn[0], nn[1], "SINK", p, m, nn[0] == defID})
+		rows = append(rows, Node{nn[0], labelOf(nn[0], nn[1]), "SINK", p, m, nn[0] == defID})
 	}
 	for _, nn := range sectionNodes(status, "Sources") {
 		p, m := volOf(nn[0])
-		rows = append(rows, Node{nn[0], nn[1], "SOURCE", p, m, false})
+		rows = append(rows, Node{nn[0], labelOf(nn[0], nn[1]), "SOURCE", p, m, false})
 	}
 	for _, nn := range sectionNodes(status, "Streams") {
+		// skip endpoint sub-rows ("out_FL > sink:playback_FL"); keep app rows
+		if strings.Contains(nn[1], ">") {
+			continue
+		}
 		p, m := volOf(nn[0])
-		rows = append(rows, Node{nn[0], nn[1], "STREAM", p, m, false})
+		rows = append(rows, Node{nn[0], friendlyDeviceLabel(nn[1]), "STREAM", p, m, false})
 	}
 	return rows
 }
