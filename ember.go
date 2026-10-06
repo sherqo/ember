@@ -279,6 +279,37 @@ func shortName(s string, n int) string {
 	return s
 }
 
+// rowLineY maps a data-row index to its terminal line in View.
+// Layout: border(0) pad(1) title(2) hint(3) flash(4, always present) blank(5),
+// heroes from 6; each new section adds blank + header (+2).
+func rowLineY(rows []Node, idx int) int {
+	y := 6
+	lastKind := ""
+	for i, r := range rows {
+		if r.Kind != lastKind && r.Kind != "OUTPUT" && r.Kind != "INPUT" {
+			y += 2
+			lastKind = r.Kind
+		}
+		if i == idx {
+			return y
+		}
+		y++
+	}
+	return -1
+}
+
+func rowAtY(rows []Node, y int) int {
+	for i := range rows {
+		if rowLineY(rows, i) == y {
+			return i
+		}
+	}
+	return -1
+}
+
+const barX0 = 37 // approx column where the 14-cell volume bar starts
+const barW = 14
+
 func volBar(pct, width int, muted bool) string {
 	if pct < 0 {
 		pct = 0
@@ -347,6 +378,74 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = string(msg)
 		return m, tickRefresh()
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if i := rowAtY(m.rows, msg.Y); i >= 0 {
+				m.cursor = i
+			}
+			if len(m.rows) > 0 {
+				n := m.rows[m.cursor]
+				if n.Kind == "OUTPUT" {
+					go sh("omarchy-audio-output-volume", "+5")
+				} else {
+					go sh("wpctl", "set-volume", n.ID, "5%+")
+					m.rows[m.cursor].Pct += 5
+				}
+			}
+		case tea.MouseButtonWheelDown:
+			if i := rowAtY(m.rows, msg.Y); i >= 0 {
+				m.cursor = i
+			}
+			if len(m.rows) > 0 {
+				n := m.rows[m.cursor]
+				if n.Kind == "OUTPUT" {
+					go sh("omarchy-audio-output-volume", "-5")
+				} else {
+					go sh("wpctl", "set-volume", n.ID, "5%-")
+					m.rows[m.cursor].Pct -= 5
+				}
+			}
+		case tea.MouseButtonRight:
+			if msg.Action == tea.MouseActionPress {
+				if i := rowAtY(m.rows, msg.Y); i >= 0 {
+					m.cursor = i
+					n := m.rows[i]
+					switch n.Kind {
+					case "OUTPUT":
+						go sh("omarchy-audio-output-volume", "mute-toggle")
+					case "INPUT":
+						go sh("omarchy-audio-input-mute")
+					default:
+						go sh("wpctl", "set-mute", n.ID, "toggle")
+					}
+					m.flash = "toggled mute"
+					return m, func() tea.Msg {
+						time.Sleep(250 * time.Millisecond)
+						return doSnapshot()
+					}
+				}
+			}
+		case tea.MouseButtonLeft:
+			if msg.Action == tea.MouseActionPress {
+				if i := rowAtY(m.rows, msg.Y); i >= 0 {
+					m.cursor = i
+					// click on the bar sets absolute volume (panel slider behavior)
+					if msg.X >= barX0 && msg.X < barX0+barW && len(m.rows) > 0 {
+						v := (msg.X - barX0 + 1) * 100 / barW
+						if v < 0 {
+							v = 0
+						}
+						if v > 100 {
+							v = 100
+						}
+						n := m.rows[i]
+						go sh("wpctl", "set-volume", n.ID, strconv.Itoa(v)+"%")
+						m.rows[i].Pct = v
+					}
+				}
+			}
+		}
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
@@ -410,12 +509,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "SOURCE":
 					go sh("omarchy-audio-input-set-default", n.ID, n.Raw)
 					m.flash = "input → " + shortName(n.Name, 30)
-				case "OUTPUT":
-					go sh("omarchy-audio-output-volume", "mute-toggle")
-				case "INPUT":
-					go sh("omarchy-audio-input-mute")
 				default:
-					go sh("wpctl", "set-mute", n.ID, "toggle")
+					m.flash = "m mutes · enter selects outputs"
 				}
 				return m, func() tea.Msg {
 					time.Sleep(300 * time.Millisecond)
@@ -432,11 +527,13 @@ func (m model) View() string {
 		return boxSt.Render(titleSt.Render("Ember") + "\n\n" + subSt.Render("scanning PipeWire…"))
 	}
 	var b strings.Builder
-	b.WriteString(titleSt.Render(" Ember ") + " " + helpSt.Render("↑↓ move · ←→ vol · m mute · enter ok · q quit"))
+	b.WriteString(titleSt.Render(" Ember ") + " " + helpSt.Render("↑↓move · ←→vol · m mute · enter select · q quit") + "\n")
+	b.WriteString(helpSt.Render("  click select · wheel volume · right-click mute") + "\n")
+	flash := " "
 	if m.flash != "" {
-		b.WriteString("  " + lipgloss.NewStyle().Foreground(cBlue).Render(m.flash))
+		flash = "  " + lipgloss.NewStyle().Foreground(cBlue).Render(m.flash)
 	}
-	b.WriteString("\n\n")
+	b.WriteString(flash + "\n\n")
 	lastKind := ""
 	for i, r := range m.rows {
 		if r.Kind != lastKind && r.Kind != "OUTPUT" && r.Kind != "INPUT" {
@@ -502,7 +599,7 @@ func main() {
 		return
 	}
 	m := model{rows: snapshot(), cursor: 0}
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ember:", err)
 		os.Exit(1)
